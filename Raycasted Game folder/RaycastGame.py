@@ -1,9 +1,12 @@
 import pygame, math, sys, os, random
+try:
+    import numpy as np          # used for the textured floor and roof (pip install numpy)
+except ImportError:
+    np = None
 
 pygame.init()
 W, H = 800, 600
 win = pygame.display.set_mode((W, H), pygame.SCALED)   # SCALED lets F4 go fullscreen cleanly
-pygame.display.set_caption("game (ESC to quit)")
 clock = pygame.time.Clock()
 
 # ---- Tweakable settings ----
@@ -15,25 +18,10 @@ PLAYER_RADIUS = 0.2    # keeps you from clipping into walls
 SWING_TIME = 0.4       # seconds for one sword swing
 SHIELD_SPEED = 14.0    # how quickly the shield raises / lowers
 FOV = math.pi / 3
-GAME_TITLE = "GAME"    # big title on the main menu
+GAME_TITLE = "Raycasted Dungeon Crawler"
+pygame.display.set_caption(GAME_TITLE)
 MENU_BG_TEXTURE_PATH = "backgroundtexture.png"  # any size, scaled to fill the window (extra is cropped) - or "" for the drawn background
 MENU_BG_DIM = 0.6      # 1.0 = full brightness, lower = darker so the buttons stay readable
-
-# ---- Sounds ----
-# Put the files next to this script (.wav or .ogg are safest, .mp3 usually works too). "" = no sound.
-# Every sound is cut off when its animation ends, so a 45 second file is fine: only the first
-# part plays. Sounds can overlap each other. Add the start of the file you want to hear first.
-SFX_VOLUME = 0.7                 # 0.0 - 1.0 for all effects
-SOUND_WALK_PATH = "walksound.wav"    # loops while you walk, fades out when you stop
-SOUND_HURT_PATH = "hurtsound.wav"    # you get hit
-SOUND_HURT_TIME = 0.3                # seconds (same length as the red damage flash)
-SOUND_HIT_PATH = "hitsound.wav"      # your sword lands on an enemy
-SOUND_HIT_TIME = 0.15                # seconds (same length as the enemy's red flash)
-SOUND_COIN_PATH = "coinsound.wav"    # plays while the gold flies, ends when the last coin lands
-SOUND_MENU_PATH = "menusound.wav"    # switching menus / pages
-SOUND_MENU_TIME = 0.3                # seconds
-AMBIENT_PATH = "ambience.mp3"        # background ambience, loops during the game (pauses with the game)
-AMBIENT_VOLUME = 0.4
 
 # ---- Procedural world (endless, built from 8x8-tile chunks) ----
 WALL_DENSITY = 0.20        # chance each tile is a wall (0.1 = open, 0.3 = cramped)
@@ -73,14 +61,31 @@ POTION_FLIP = False    # mirror the image left/right (applied after rotating)
 POTION_HEIGHT = 160    # on-screen height in pixels (aspect ratio is kept)
 START_POTIONS = 3
 MAX_POTIONS = 9
-POTION_HEAL = 40       # health restored per potion
+POTION_HEAL = 25       # health restored per potion
 POTION_TIME = 0.9      # seconds the drinking animation takes
 POTION_DROP_CHANCE = 0.3   # chance an enemy drops a potion when killed
+# Shop upgrades (Shop > Potions tab). Each step is (gold cost, amount added). Add or remove steps freely.
+POTION_UPGRADES = {
+    "heal": {"name": "Potion Potency", "steps": [(8, 5), (15, 5), (25, 15), (40, 5)]},    # + health per potion
+    "drop": {"name": "Potion Luck",    "steps": [(10, 0.05), (20, 0.05), (32, 0.05), (48, 0.05)]},  # + drop chance
+    "max": {"name": "Potion Capacity", "steps": [(12, 1), (24, 1), (36, 1), (48, 1)]}  # + max potions
+}
 
 # ---- Wall texture ----
 # Put the path to your wall image here, e.g. "wall.png"
 # Leave it empty ("") to use a plain placeholder pattern.
 WALL_TEXTURE_PATH = "walltexture.png"  # or "" for placeholder
+
+# ---- Floor & roof textures ----
+# Put the image files next to this script. Seamless/tileable images look best (64x64 or 128x128 is plenty).
+# Leave a path empty ("") - or if the file is missing - to get a flat color instead.
+FLOOR_TEXTURE_PATH = "floortexture.png"   # or "" for a flat color
+ROOF_TEXTURE_PATH = "rooftexture.png"     # or "" for a flat color
+FLOOR_COLOR = (85, 75, 65)    # flat color used when there's no floor image
+ROOF_COLOR = (50, 50, 65)     # flat color used when there's no roof image
+FLOOR_TILE = 1.0     # how many map tiles one copy of the floor image covers (2.0 = twice as big, 0.5 = smaller)
+ROOF_TILE = 1.0      # same, for the roof
+FLOOR_DETAIL = 2     # 1 = sharpest but slowest, 2 = good balance, 3-4 = chunkier but fastest
 
 # ---- Sword & shield textures ----
 # Leave empty ("") to use the built-in drawn versions.
@@ -149,6 +154,79 @@ def load_wall_texture(path):
 
 wall_tex = load_wall_texture(WALL_TEXTURE_PATH)
 TEX_W, TEX_H = wall_tex.get_size()
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
+
+def find_image(path):
+    """Find the image: exact name first, then a forgiving search (any capitalization, any image
+    extension, even a doubled one like 'floor.png.png') in this script's folder."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for p in (path, os.path.join(script_dir, path)):
+        if os.path.isfile(p):
+            return p
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    for folder in (script_dir, os.getcwd()):
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in names:
+            if name.lower().startswith(stem) and name.lower().endswith(IMAGE_EXTS):
+                return os.path.join(folder, name)
+    return None
+
+def load_flat_texture(path, color, label):
+    """Pixel array (width, height, 3) for the floor/roof: your image, or a single solid color."""
+    if path:
+        p = find_image(path)
+        if p:
+            try:
+                img = pygame.image.load(p).convert()
+                print(f"Loaded {label} texture: {p} ({img.get_width()}x{img.get_height()})")
+                return pygame.surfarray.array3d(img)
+            except Exception as err:
+                print(f"Found '{p}' but could not load the {label} texture: {err}")
+        else:
+            folder = os.path.dirname(os.path.abspath(__file__))
+            print(f"{label} texture '{path}' not found - using a flat color.")
+            print(f"  Looked in: {folder}")
+            print("  Image files there:", [n for n in sorted(os.listdir(folder)) if n.lower().endswith(IMAGE_EXTS)])
+    return np.array([[color]], dtype=np.uint8)
+
+if np is None:
+    print("numpy is not installed - floor and roof will be flat colors. Install it with: pip install numpy")
+else:
+    floor_tex = load_flat_texture(FLOOR_TEXTURE_PATH, FLOOR_COLOR, "floor")
+    roof_tex = load_flat_texture(ROOF_TEXTURE_PATH, ROOF_COLOR, "roof")
+    # Everything below depends only on the screen size, so it's worked out once here.
+    _D = max(1, int(FLOOR_DETAIL))
+    _fh = H - H // 2                                  # pixel rows below the horizon
+    _nr, _nc = (_fh + _D - 1) // _D, (W + _D - 1) // _D
+    _dy = (np.arange(_nr) + 0.5) * _D                 # screen rows below the horizon
+    _perp = (H / 2) / _dy                             # distance of the floor seen on each row
+    _off = -FOV / 2 + FOV * (np.arange(_nc) * _D + _D / 2) / W    # each column's angle from straight ahead
+    _dist = _perp[:, None] / np.cos(_off)[None, :]    # distance along each ray (fixes fisheye)
+    _shade = (1 / (1 + _perp ** 2 * 0.5))[:, None, None]          # same darkening as the walls
+
+def draw_floor_roof(surface, px, py, pa):
+    """Floor below the horizon, roof above it (the roof is the floor mirrored)."""
+    if np is None:
+        surface.fill(ROOF_COLOR, (0, 0, W, H // 2))
+        surface.fill(FLOOR_COLOR, (0, H // 2, W, H - H // 2))
+        return
+    ang = pa + _off
+    wx = px + np.cos(ang)[None, :] * _dist           # where each screen pixel lands in the world
+    wy = py + np.sin(ang)[None, :] * _dist
+    halves = []
+    for tex, tile in ((floor_tex, FLOOR_TILE), (roof_tex, ROOF_TILE)):
+        tw, th = tex.shape[0], tex.shape[1]
+        tx = ((wx / tile) % 1.0 * tw).astype(np.int32) % tw
+        ty = ((wy / tile) % 1.0 * th).astype(np.int32) % th
+        pix = (tex[tx, ty] * _shade).astype(np.uint8)
+        surf = pygame.surfarray.make_surface(np.ascontiguousarray(pix.swapaxes(0, 1)))
+        halves.append(pygame.transform.scale(surf, (W, _fh)))
+    surface.blit(halves[0], (0, H // 2))
+    surface.blit(pygame.transform.flip(halves[1], False, True), (0, H // 2 - _fh))
 
 def load_overlay_image(path, height, label, rotate=0, flip=False):
     """Load a transparent overlay image scaled to `height`, or None if unset."""
@@ -264,91 +342,6 @@ big_font = pygame.font.Font(None, 90)
 menu_font = pygame.font.Font(None, 36)
 title_font = pygame.font.Font(None, 64)
 
-# ---- Sound ----
-try:
-    if not pygame.mixer.get_init():
-        pygame.mixer.init()
-except pygame.error as err:
-    print(f"No audio device ({err}) - the game will run silent.")
-AUDIO_OK = pygame.mixer.get_init() is not None
-if AUDIO_OK:
-    pygame.mixer.set_num_channels(16)      # up to 16 sounds at once
-    pygame.mixer.set_reserved(1)           # channel 0 is kept free for the walking loop
-
-def find_file(path):
-    if not path:
-        return None
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    for p in (path, os.path.join(script_dir, path)):
-        if os.path.isfile(p):
-            return p
-    return None
-
-def load_sound(path, label):
-    if not path or not AUDIO_OK:
-        return None
-    p = find_file(path)
-    if p is None:
-        print(f"{label} sound not found: {os.path.abspath(path)} - no sound.")
-        return None
-    try:
-        s = pygame.mixer.Sound(p)
-        s.set_volume(SFX_VOLUME)
-        print(f"Loaded {label} sound: {p}")
-        return s
-    except Exception as err:
-        print(f"Found '{p}' but could not load {label} sound: {err}")
-        return None
-
-snd_walk = load_sound(SOUND_WALK_PATH, "walk")
-snd_hurt = load_sound(SOUND_HURT_PATH, "hurt")
-snd_hit = load_sound(SOUND_HIT_PATH, "hit")
-snd_coin = load_sound(SOUND_COIN_PATH, "coin")
-snd_menu = load_sound(SOUND_MENU_PATH, "menu")
-if AUDIO_OK and AMBIENT_PATH and find_file(AMBIENT_PATH) is None:
-    print(f"ambience not found: {os.path.abspath(AMBIENT_PATH)} - no ambience.")
-
-def play_sfx(snd, seconds=None):
-    """Play a sound (overlapping anything else); `seconds` cuts it off when its animation ends."""
-    if snd is None:
-        return
-    snd.play(maxtime=int(seconds * 1000) if seconds else 0)
-
-_walking = False
-def set_walking(on):
-    """Footsteps loop while you move and fade out the moment you stop."""
-    global _walking
-    if snd_walk is None or on == _walking:
-        return
-    _walking = on
-    ch = pygame.mixer.Channel(0)
-    if on:
-        ch.play(snd_walk, loops=-1, fade_ms=80)
-    else:
-        ch.fadeout(120)
-
-def start_ambience():
-    p = find_file(AMBIENT_PATH)
-    if not AUDIO_OK or p is None:
-        return
-    try:
-        pygame.mixer.music.load(p)
-        pygame.mixer.music.set_volume(AMBIENT_VOLUME)
-        pygame.mixer.music.play(-1, fade_ms=600)       # loops for as long as you're in the game
-    except Exception as err:
-        print(f"Could not play ambience '{p}': {err}")
-
-def set_ambience_paused(is_paused):
-    if AUDIO_OK:
-        if is_paused:
-            pygame.mixer.music.pause()
-        else:
-            pygame.mixer.music.unpause()
-
-def stop_ambience():
-    if AUDIO_OK:
-        pygame.mixer.music.stop()
-
 # ---- Items: (name, cost, stat) - index 0 is what you start with ----
 ITEMS = {
     "sword":  [("Rusty Sword", 0, 1), ("Iron Sword", 15, 2), ("Diamond Sword", 40, 3)],           # stat = damage
@@ -372,6 +365,31 @@ equipped = {"sword": 0, "shield": 0, "armor": 0}
 gold = 0
 gold_pop = 0       # last gold drop, shown as "+N" next to the gold counter
 gold_pop_t = 0.0
+potion_level = {k: 0 for k in POTION_UPGRADES}      # how many upgrades of each kind you've bought
+
+POTION_BASE = {"heal": POTION_HEAL, "drop": POTION_DROP_CHANCE, "max": MAX_POTIONS}   # value at level 0
+
+def potion_value(key, lvl):
+    steps = POTION_UPGRADES.get(key, {}).get("steps", [])[:lvl]
+    total = POTION_BASE[key] + sum(a for _, a in steps)
+    return min(1.0, total) if key == "drop" else total
+
+def potion_heal():
+    return potion_value("heal", potion_level.get("heal", 0))
+
+def potion_drop_chance():
+    return potion_value("drop", potion_level.get("drop", 0))
+
+def potion_max():
+    return potion_value("max", potion_level.get("max", 0))
+
+def potion_stat_text(key, lvl):
+    v = potion_value(key, lvl)
+    if key == "heal":
+        return f"Heals {v} HP"
+    if key == "drop":
+        return f"Drop chance {round(v * 100)}%"
+    return f"Max {v} potions"
 
 def stat_text(kind, v):
     return {"sword": f"Damage {v}", "shield": f"Block arc {v}", "armor": f"{v}% less damage"}[kind]
@@ -443,14 +461,10 @@ def enemy_screen_pos(en):
 def spawn_gold_coins(en, n):
     """One coin per gold dropped; they pop up out of the enemy one after another."""
     x, y, r0 = enemy_screen_pos(en)
-    longest = 0.0
     for i in range(n):
-        dur = random.uniform(0.7, 0.9)
-        longest = max(longest, dur * (1 + i * 0.1))         # when this coin lands
         fly_coins.append({"x0": x + random.uniform(-18, 18), "y0": y + random.uniform(-10, 10),
-                          "r0": r0, "t": -i * 0.1, "dur": dur,
+                          "r0": r0, "t": -i * 0.1, "dur": random.uniform(0.7, 0.9),
                           "bend": random.uniform(-90, 90)})
-    play_sfx(snd_coin, longest)                             # ends exactly when the last coin lands
 
 def update_coins(dt):
     for c in fly_coins:
@@ -676,18 +690,14 @@ def spawn_enemy():
     return False
 
 def sword_hit():
-    landed = False
     for en in enemies:
         dx, dy = en.x - player_x, en.y - player_y
         dist = math.hypot(dx, dy)
         if dist < SWORD_RANGE and abs(angle_diff(math.atan2(dy, dx), player_angle)) < math.radians(SWORD_ARC_DEG):
             en.hp -= ITEMS["sword"][equipped["sword"]][2]
             en.flash = 0.15
-            landed = True
             if dist > 0:
                 push(en, dx / dist * 0.5, dy / dist * 0.5)  # knockback
-    if landed:
-        play_sfx(snd_hit, SOUND_HIT_TIME)
 
 def update_enemies(dt):
     global player_health, damage_flash, spawn_timer, kills, potions, gold, gold_pop, gold_pop_t
@@ -722,12 +732,11 @@ def update_enemies(dt):
                 dmg = max(1, round(ENEMY_DAMAGE * (100 - ITEMS["armor"][equipped["armor"]][2]) / 100))
                 player_health = max(0, player_health - dmg)
                 damage_flash = 0.3
-                play_sfx(snd_hurt, SOUND_HURT_TIME)
 
     alive_list = [e for e in enemies if e.hp > 0]
     for dead in [e for e in enemies if e.hp <= 0]:
-        if random.random() < POTION_DROP_CHANCE:
-            potions = min(MAX_POTIONS, potions + 1)
+        if random.random() < potion_drop_chance():
+            potions = min(potion_max(), potions + 1)
         drop = random.randint(GOLD_MIN, GOLD_MAX)
         gold += drop
         gold_pop, gold_pop_t = drop, 1.2
@@ -821,6 +830,7 @@ def reset_game():
     gold, gold_pop_t = 0, 0.0
     owned.update({"sword": {0}, "shield": {0}, "armor": {0}})
     equipped.update({"sword": 0, "shield": 0, "armor": 0})
+    potion_level.update({k: 0 for k in POTION_UPGRADES})
     vel_x = vel_y = 0.0
     swing_t, swing_hit, blocking, shield_amt = None, False, False, 0.0
     player_health, kills, spawn_timer, damage_flash = PLAYER_MAX_HEALTH, 0, 1.5, 0.0
@@ -853,9 +863,9 @@ MENU_PAGES = {
         "Left Click   -   Swing sword",
         "Right Click (hold)   -   Block with shield",
         "R   -   Drink potion  (restart when dead)",
-        "Tab   -   Pause menu",
+        "Esc   -   Pause menu  (also goes back)",
         "F4   -   Toggle fullscreen",
-        "Esc   -   Quit",
+        "Quit   -   Use the menu buttons",
     ],
     "settings": ["Coming soon..."],
 }
@@ -871,9 +881,6 @@ def set_paused(value):
     global paused, menu_page, pause_bg, mouse_dx_smooth
     paused = value
     menu_page = "main"
-    play_sfx(snd_menu, SOUND_MENU_TIME)
-    set_walking(False)
-    set_ambience_paused(value)
     if value:
         pause_bg = win.copy()               # freeze the last frame as the backdrop
         pygame.mouse.set_visible(True)
@@ -983,7 +990,7 @@ def draw_inventory(surface):
         f"Sword:  {ITEMS['sword'][equipped['sword']][0]}  ({stat_text('sword', ITEMS['sword'][equipped['sword']][2])})",
         f"Shield:  {ITEMS['shield'][equipped['shield']][0]}  ({stat_text('shield', ITEMS['shield'][equipped['shield']][2])})",
         f"Armor:  {ITEMS['armor'][equipped['armor']][0]}  ({stat_text('armor', ITEMS['armor'][equipped['armor']][2])})",
-        f"Potions:  {potions}",
+        f"Potions:  {potions}/{potion_max()}  (heals {potion_heal()})",
     ]
     y = 175
     for line in lines:
@@ -1012,9 +1019,32 @@ def shop_cards():
             out.append((kind, j, pygame.Rect(50 + ci * 240, 180 + (j - 1) * 80, 220, 70)))
     return out
 
+shop_tab = "gear"      # "gear" or "potions"
+
+def tier_unlocked(kind, j):
+    """Gear has to be bought in order: you need the previous tier before you can buy this one."""
+    return (j - 1) in owned[kind]
+
+def shop_tab_rects():
+    return {"gear": pygame.Rect(50, 112, 110, 32), "potions": pygame.Rect(170, 112, 110, 32)}
+
+def potion_cards():
+    return [(key, pygame.Rect(50 + (i % 2) * 360, 190 + (i // 2) * 125, 340, 110))
+            for i, key in enumerate(POTION_UPGRADES)]
+
 def draw_shop(surface):
     mouse = pygame.mouse.get_pos()
     draw_gold_label(surface)
+    for tab, rect in shop_tab_rects().items():
+        active = tab == shop_tab
+        pygame.draw.rect(surface, (120, 30, 30) if active or rect.collidepoint(mouse) else (50, 50, 60),
+                         rect, border_radius=6)
+        pygame.draw.rect(surface, (230, 230, 230), rect, 2, border_radius=6)
+        lt = font.render(tab.capitalize(), True, (255, 255, 255))
+        surface.blit(lt, lt.get_rect(center=rect.center))
+    if shop_tab == "potions":
+        draw_potion_shop(surface, mouse)
+        return
     for ci, name in enumerate(("Swords", "Shields", "Armor")):
         h = font.render(name, True, (230, 230, 230))
         surface.blit(h, h.get_rect(center=(160 + ci * 240, 160)))
@@ -1024,23 +1054,75 @@ def draw_shop(surface):
             status, scol = "EQUIPPED", (120, 220, 120)
         elif j in owned[kind]:
             status, scol = "OWNED", (170, 170, 170)
+        elif not tier_unlocked(kind, j):
+            status, scol = "Locked", (110, 110, 110)
         elif gold >= cost:
             status, scol = f"Buy - {cost} gold", (255, 230, 120)
         else:
             status, scol = f"{cost} gold", (220, 90, 90)
-        hover = rect.collidepoint(mouse) and j not in owned[kind]
-        pygame.draw.rect(surface, (120, 30, 30) if hover else (50, 50, 60), rect, border_radius=8)
-        pygame.draw.rect(surface, (230, 230, 230), rect, 2, border_radius=8)
+        locked = j not in owned[kind] and not tier_unlocked(kind, j)
+        hover = rect.collidepoint(mouse) and j not in owned[kind] and not locked
+        bg = (38, 38, 44) if locked else ((120, 30, 30) if hover else (50, 50, 60))
+        pygame.draw.rect(surface, bg, rect, border_radius=8)
+        pygame.draw.rect(surface, (120, 120, 120) if locked else (230, 230, 230), rect, 2, border_radius=8)
         draw_icon(surface, kind, j, rect.x + 32, rect.centery, 22)
-        surface.blit(font.render(name, True, (255, 255, 255)), (rect.x + 66, rect.y + 8))
-        surface.blit(font.render(stat_text(kind, stat), True, (190, 190, 190)), (rect.x + 66, rect.y + 28))
+        surface.blit(font.render(name, True, (130, 130, 130) if locked else (255, 255, 255)), (rect.x + 66, rect.y + 8))
+        surface.blit(font.render(stat_text(kind, stat), True, (110, 110, 110) if locked else (190, 190, 190)), (rect.x + 66, rect.y + 28))
         surface.blit(font.render(status, True, scol), (rect.x + 66, rect.y + 48))
+        if locked and rect.collidepoint(mouse):
+            tip = font.render(f"Buy the {ITEMS[kind][j - 1][0]} first", True, (255, 220, 120))
+            surface.blit(tip, tip.get_rect(center=(W // 2, 440)))
+
+def draw_potion_shop(surface, mouse):
+    for key, rect in potion_cards():
+        steps = POTION_UPGRADES[key]["steps"]
+        lvl = potion_level[key]
+        maxed = lvl >= len(steps)
+        pygame.draw.rect(surface, (120, 30, 30) if rect.collidepoint(mouse) and not maxed else (50, 50, 60),
+                         rect, border_radius=8)
+        pygame.draw.rect(surface, (230, 230, 230), rect, 2, border_radius=8)
+        surface.blit(potion_icon, potion_icon.get_rect(center=(rect.x + 30, rect.y + 36)))
+        surface.blit(font.render(POTION_UPGRADES[key]["name"], True, (255, 255, 255)), (rect.x + 62, rect.y + 10))
+        surface.blit(font.render(potion_stat_text(key, lvl), True, (190, 190, 190)), (rect.x + 62, rect.y + 32))
+        for i in range(len(steps)):                       # level pips
+            col = (120, 220, 120) if i < lvl else (30, 30, 36)
+            pygame.draw.circle(surface, col, (rect.x + 70 + i * 24, rect.y + 62), 8)
+            pygame.draw.circle(surface, (230, 230, 230), (rect.x + 70 + i * 24, rect.y + 62), 8, 2)
+        if maxed:
+            status, scol = "MAX LEVEL", (120, 220, 120)
+        else:
+            cost = steps[lvl][0]
+            nxt = potion_stat_text(key, lvl + 1)
+            if gold >= cost:
+                status, scol = f"Upgrade: {nxt} - {cost} gold", (255, 230, 120)
+            else:
+                status, scol = f"Upgrade: {nxt} - {cost} gold", (220, 90, 90)
+        surface.blit(font.render(status, True, scol), (rect.x + 14, rect.y + 84))
+
+def buy_potion_upgrade(key):
+    steps = POTION_UPGRADES[key]["steps"]
+    lvl = potion_level[key]
+    global gold
+    if lvl < len(steps) and gold >= steps[lvl][0]:
+        gold -= steps[lvl][0]
+        potion_level[key] += 1
 
 def page_click(pos):
     """Clicks inside the inventory / shop pages."""
+    global shop_tab
     if menu_page == "shop":
+        for tab, rect in shop_tab_rects().items():
+            if rect.collidepoint(pos):
+                shop_tab = tab
+                return
+        if shop_tab == "potions":
+            for key, rect in potion_cards():
+                if rect.collidepoint(pos):
+                    buy_potion_upgrade(key)
+            return
         for kind, j, rect in shop_cards():
-            if rect.collidepoint(pos) and j not in owned[kind] and gold >= ITEMS[kind][j][1]:
+            if (rect.collidepoint(pos) and j not in owned[kind] and tier_unlocked(kind, j)
+                    and gold >= ITEMS[kind][j][1]):
                 buy(kind, j)
     elif menu_page == "inventory":
         items = bag_items()
@@ -1071,10 +1153,8 @@ def menu_click(pos):
                 go_to_main_menu()
             elif action == "back":
                 menu_page = "main"
-                play_sfx(snd_menu, SOUND_MENU_TIME)
             else:
                 menu_page = action
-                play_sfx(snd_menu, SOUND_MENU_TIME)
             return
 
 def draw_pause_menu(surface):
@@ -1115,6 +1195,8 @@ def main_menu_buttons():
 def draw_main_menu(surface):
     surface.blit(menu_bg, (0, 0))
     t = big_font.render(GAME_TITLE, True, (255, 255, 255))
+    if t.get_width() > 440:                                # long title: shrink to fit
+        t = pygame.transform.smoothscale(t, (440, max(1, int(t.get_height() * 440 / t.get_width()))))
     surface.blit(t, t.get_rect(center=(MM_X + BTN_W // 2, 160)))
     draw_person(surface, 600, 230, 398, armor_idx=0)      # preview of the picked character
     mouse = pygame.mouse.get_pos()
@@ -1130,8 +1212,6 @@ def start_game():
     reset_game()                                # fresh world, gear, gold and enemies every run
     state = "playing"
     mouse_dx_smooth = 0.0
-    play_sfx(snd_menu, SOUND_MENU_TIME)
-    start_ambience()
     pygame.mouse.set_visible(False)
     pygame.event.set_grab(True)
     pygame.mouse.get_rel()                      # avoid a camera jump
@@ -1139,9 +1219,6 @@ def start_game():
 def go_to_main_menu():
     global state, paused, menu_page
     state, paused, menu_page = "menu", False, "main"
-    stop_ambience()
-    set_walking(False)
-    play_sfx(snd_menu, SOUND_MENU_TIME)
     pygame.mouse.set_visible(True)
     pygame.event.set_grab(False)
 
@@ -1153,7 +1230,6 @@ def main_menu_click(pos):
                 start_game()
             elif action == "character":
                 character = "female" if character == "male" else "male"
-                play_sfx(snd_menu, SOUND_MENU_TIME)
             elif action == "quit":
                 pygame.quit(); sys.exit()
             return
@@ -1169,13 +1245,14 @@ while True:
     for e in pygame.event.get():
         if e.type == pygame.QUIT:
             pygame.quit(); sys.exit()
-        if e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE:
-            pygame.quit(); sys.exit()
         # Left click = swing sword (only if not blocking or already swinging)
         if e.type == pygame.KEYDOWN and e.key == pygame.K_F4:
             toggle_fullscreen()
-        if e.type == pygame.KEYDOWN and e.key == pygame.K_TAB and state == "playing":
-            set_paused(not paused)
+        if e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE and state == "playing":
+            if paused and menu_page != "main":
+                menu_page = "main"                  # Esc inside Controls / Inventory / Shop goes back
+            else:
+                set_paused(not paused)              # Esc opens / closes the pause menu
         if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
             if state == "menu":
                 main_menu_click(e.pos)
@@ -1231,7 +1308,6 @@ while True:
     k = 1 - math.exp(-MOVE_SMOOTH * dt)
     vel_x += (target_vx - vel_x) * k
     vel_y += (target_vy - vel_y) * k
-    set_walking(alive and math.hypot(vel_x, vel_y) > 0.6)     # footsteps while you move
 
     # Move each axis separately so you slide along walls
     new_x = player_x + vel_x * dt
@@ -1264,7 +1340,7 @@ while True:
         if not drink_healed and drinking_t >= 0.5:      # heal at the moment of drinking
             drink_healed = True
             potions -= 1
-            player_health = min(PLAYER_MAX_HEALTH, player_health + POTION_HEAL)
+            player_health = min(PLAYER_MAX_HEALTH, player_health + potion_heal())
         if drinking_t >= 1:
             drinking_t = None
     drink_pose = (keyframes(drinking_t, [(0, 0), (0.2, 1), (0.8, 1), (1, 0)])
@@ -1281,7 +1357,7 @@ while True:
         update_enemies(dt)
 
     # ---- Render ----
-    win.fill((0, 0, 0))
+    draw_floor_roof(win, player_x, player_y, player_angle)
     fov = FOV
     zbuf = [0.0] * W
     for i in range(W):
