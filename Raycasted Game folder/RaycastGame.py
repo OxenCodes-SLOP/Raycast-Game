@@ -18,7 +18,7 @@ PLAYER_RADIUS = 0.2    # keeps you from clipping into walls
 SWING_TIME = 0.4       # seconds for one sword swing
 SHIELD_SPEED = 14.0    # how quickly the shield raises / lowers
 FOV = math.pi / 3
-GAME_TITLE = "Raycasted Dungeon Crawler"
+GAME_TITLE = "GAME"    # big title on the main menu (also the window title)
 pygame.display.set_caption(GAME_TITLE)
 MENU_BG_TEXTURE_PATH = "backgroundtexture.png"  # any size, scaled to fill the window (extra is cropped) - or "" for the drawn background
 MENU_BG_DIM = 0.6      # 1.0 = full brightness, lower = darker so the buttons stay readable
@@ -50,8 +50,19 @@ ENEMY_DAMAGE = 10
 ENEMY_ATTACK_RANGE = 0.9
 ENEMY_ATTACK_COOLDOWN = 1.2   # seconds between attacks
 ENEMY_RADIUS = 0.2
-ENEMY_COUNT = 3        # always exactly this many enemies, all in the chunk you are standing in
+ENEMY_COUNT = 3        # enemies at the start, all in the chunk you are standing in (grows with upgrades, see below)
 SPAWN_MIN_DIST = 3.0   # an enemy never spawns closer than this to you
+ENEMIES_PER_UPGRADE = 1   # extra enemies for every upgrade you buy in the shop (gear tiers + potion levels)
+MAX_ENEMY_COUNT = 12      # never more than this many at once (lower it if the game gets laggy)
+
+# Elite enemies: once you own EVERY upgrade (all gear bought + all potion upgrades maxed),
+# enemies turn into tougher elites with their own texture. Same rules as ENEMY_TEXTURE_PATH above.
+ELITE_TEXTURE_PATH = "orctexture.png"  # or "" to just tint the normal enemy
+ELITE_TINT = (255, 90, 90)   # color multiplied over the normal enemy image when there's no elite image
+ELITE_HEALTH = 6       # sword hits to kill
+ELITE_SPEED = 1.2      # map units per second
+ELITE_DAMAGE = 18
+ELITE_SCALE = 0.95     # height relative to wall height
 
 # ---- Potions (press R to drink) ----
 # Potion image: upright bottle, transparent PNG works best. Leave "" for a drawn red potion.
@@ -319,6 +330,10 @@ def make_placeholder_enemy(h=256):
 enemy_img = load_overlay_image(ENEMY_TEXTURE_PATH, 256, "enemy")
 if enemy_img is None:
     enemy_img = make_placeholder_enemy()
+elite_img = load_overlay_image(ELITE_TEXTURE_PATH, 256, "elite enemy")
+if elite_img is None:                                  # no file: a tinted copy of the normal enemy
+    elite_img = enemy_img.copy()
+    elite_img.fill(ELITE_TINT, special_flags=pygame.BLEND_RGB_MULT)
 def make_placeholder_potion(h):
     """Simple red potion used when no potion image is provided."""
     w = int(h * 0.6)
@@ -391,6 +406,17 @@ def potion_stat_text(key, lvl):
         return f"Drop chance {round(v * 100)}%"
     return f"Max {v} potions"
 
+def upgrades_bought():
+    """Every shop purchase so far: gear tiers (not the starting ones) + potion upgrade levels."""
+    return sum(len(owned[k]) - 1 for k in ITEMS) + sum(potion_level.values())
+
+def all_upgrades_owned():
+    return (all(len(owned[k]) == len(ITEMS[k]) for k in ITEMS)
+            and all(potion_level.get(k, 0) >= len(v["steps"]) for k, v in POTION_UPGRADES.items()))
+
+def enemy_count():
+    return min(MAX_ENEMY_COUNT, ENEMY_COUNT + ENEMIES_PER_UPGRADE * upgrades_bought())
+
 def stat_text(kind, v):
     return {"sword": f"Damage {v}", "shield": f"Block arc {v}", "armor": f"{v}% less damage"}[kind]
 
@@ -453,7 +479,7 @@ def enemy_screen_pos(en):
     if cd < 0.25:                                   # behind you or right on top of you
         return W / 2, H * 0.6, 28
     wall_h = H / cd
-    sh = wall_h * ENEMY_SCALE
+    sh = wall_h * en.scale
     x = max(30, min(W - 30, W * (rel / FOV + 0.5)))
     y = max(60, min(H - 60, (H + wall_h) / 2 - sh * 0.6))      # about chest height
     return x, y, max(18, min(36, int(sh * 0.1)))
@@ -659,11 +685,22 @@ def draw_potion(surface, t):
 
 # ---- Enemies & HUD ----
 class Enemy:
-    def __init__(self, x, y):
+    def __init__(self, x, y, elite=False):
         self.x, self.y = x, y
         self.hp = ENEMY_HEALTH
+        self.speed, self.damage, self.scale = ENEMY_SPEED, ENEMY_DAMAGE, ENEMY_SCALE
+        self.elite = False
         self.cooldown = random.uniform(0.6, 1.2)
         self.flash = 0.0
+        if elite:
+            self.promote()
+
+    def promote(self):
+        """Become an elite: more health (damage already taken still counts), faster, hits harder, new texture."""
+        if not self.elite:
+            self.hp += ELITE_HEALTH - ENEMY_HEALTH
+            self.elite = True
+        self.speed, self.damage, self.scale = ELITE_SPEED, ELITE_DAMAGE, ELITE_SCALE
 
 enemies = []
 def angle_diff(a, b):
@@ -685,7 +722,7 @@ def spawn_enemy():
         if (math.hypot(x - player_x, y - player_y) >= SPAWN_MIN_DIST
                 and not blocked(x, y, ENEMY_RADIUS)
                 and all(math.hypot(x - e.x, y - e.y) > 0.8 for e in enemies)):
-            enemies.append(Enemy(x, y))
+            enemies.append(Enemy(x, y, all_upgrades_owned()))
             return True
     return False
 
@@ -701,9 +738,16 @@ def sword_hit():
 
 def update_enemies(dt):
     global player_health, damage_flash, spawn_timer, kills, potions, gold, gold_pop, gold_pop_t
+    global elite_announced, elite_banner_t
     # enemies only live in your chunk: leave it and the old ones are deleted (new ones spawn below)
     pk = (math.floor(player_x) >> 3, math.floor(player_y) >> 3)
     enemies[:] = [e for e in enemies if (math.floor(e.x) >> 3, math.floor(e.y) >> 3) == pk]
+    if all_upgrades_owned():                            # every upgrade bought: enemies become elites
+        if not elite_announced:
+            elite_announced, elite_banner_t = True, 4.0
+        for en in enemies:
+            if not en.elite:
+                en.promote()
     for en in enemies:
         en.flash = max(0.0, en.flash - dt)
         en.cooldown -= dt
@@ -711,7 +755,7 @@ def update_enemies(dt):
         dist = math.hypot(dx, dy) or 0.001
 
         if dist > ENEMY_ATTACK_RANGE * 0.8:
-            step = ENEMY_SPEED * dt
+            step = en.speed * dt
             push(en, dx / dist * step, dy / dist * step)
 
         # keep enemies from stacking on each other
@@ -729,7 +773,7 @@ def update_enemies(dt):
             if shield_amt > 0.6 and in_front:
                 push(en, -dx / dist * 0.4, -dy / dist * 0.4)   # blocked: knocked back
             else:
-                dmg = max(1, round(ENEMY_DAMAGE * (100 - ITEMS["armor"][equipped["armor"]][2]) / 100))
+                dmg = max(1, round(en.damage * (100 - ITEMS["armor"][equipped["armor"]][2]) / 100))
                 player_health = max(0, player_health - dmg)
                 damage_flash = 0.3
 
@@ -743,13 +787,12 @@ def update_enemies(dt):
         spawn_gold_coins(dead, drop)
     kills += len(enemies) - len(alive_list)
     enemies[:] = alive_list
-    # always keep exactly ENEMY_COUNT enemies in your chunk
-    while len(enemies) < ENEMY_COUNT and spawn_enemy():
+    # always keep exactly enemy_count() enemies in your chunk (more as you buy upgrades)
+    while len(enemies) < enemy_count() and spawn_enemy():
         pass
 
 def draw_enemies(surface, px, py, pang, zbuf):
     order = sorted(enemies, key=lambda e: -math.hypot(e.x - px, e.y - py))
-    img_aspect = enemy_img.get_width() / enemy_img.get_height()
     for en in order:
         dx, dy = en.x - px, en.y - py
         dist = math.hypot(dx, dy)
@@ -760,11 +803,12 @@ def draw_enemies(surface, px, py, pang, zbuf):
         if cd < 0.25:
             continue
         wall_h = H / cd
-        sh = int(wall_h * ENEMY_SCALE)
-        sw = int(sh * img_aspect)
+        img = elite_img if en.elite else enemy_img
+        sh = int(wall_h * en.scale)
+        sw = int(sh * img.get_width() / img.get_height())
         if sh < 2 or sw < 1:
             continue
-        sprite = pygame.transform.scale(enemy_img, (sw, sh))
+        sprite = pygame.transform.scale(img, (sw, sh))
         if en.flash > 0:
             sprite.fill((140, 40, 40), special_flags=pygame.BLEND_RGB_ADD)
         shade = max(35, int(255 / (1 + cd * cd * 0.5)))
@@ -812,6 +856,8 @@ swing_hit = False         # has this swing already landed?
 player_health = PLAYER_MAX_HEALTH
 kills = 0
 spawn_timer = 1.5
+elite_announced = False   # has the 'enemies grew stronger' message been shown this run?
+elite_banner_t = 0.0
 damage_flash = 0.0
 potions = START_POTIONS
 drinking_t = None         # None = not drinking, else 0..1 progress
@@ -824,10 +870,11 @@ death_surf.fill((80, 0, 0, 150))
 def reset_game():
     global player_x, player_y, player_angle, vel_x, vel_y, swing_t, swing_hit
     global shield_amt, blocking, player_health, kills, spawn_timer, damage_flash
-    global potions, drinking_t, drink_healed, gold, gold_pop_t
+    global potions, drinking_t, drink_healed, gold, gold_pop_t, elite_announced, elite_banner_t
     new_map()                                  # fresh random map every restart
     player_x, player_y, player_angle = START_X, START_Y, random.uniform(0, 2 * math.pi)
     gold, gold_pop_t = 0, 0.0
+    elite_announced, elite_banner_t = False, 0.0
     owned.update({"sword": {0}, "shield": {0}, "armor": {0}})
     equipped.update({"sword": 0, "shield": 0, "armor": 0})
     potion_level.update({k: 0 for k in POTION_UPGRADES})
@@ -1042,6 +1089,9 @@ def draw_shop(surface):
         pygame.draw.rect(surface, (230, 230, 230), rect, 2, border_radius=6)
         lt = font.render(tab.capitalize(), True, (255, 255, 255))
         surface.blit(lt, lt.get_rect(center=rect.center))
+    hint = font.render(f"Every upgrade you buy adds {ENEMIES_PER_UPGRADE} more enemy  (enemies now: {enemy_count()})",
+                       True, (170, 170, 170))
+    surface.blit(hint, hint.get_rect(center=(W // 2, 462)))
     if shop_tab == "potions":
         draw_potion_shop(surface, mouse)
         return
@@ -1349,6 +1399,7 @@ while True:
     # ---- World chunks (generate nearby, delete far away) ----
     update_chunks()
     gold_pop_t = max(0.0, gold_pop_t - dt)
+    elite_banner_t = max(0.0, elite_banner_t - dt)
     update_coins(dt)
 
     # ---- Enemies ----
@@ -1396,6 +1447,10 @@ while True:
     draw_shield(win, shield_amt)
     draw_potion(win, drinking_t)
     draw_hud(win)
+    if elite_banner_t > 0:
+        bt = menu_font.render("The enemies have grown stronger!", True, (255, 120, 120))
+        bt.set_alpha(int(255 * min(1.0, elite_banner_t / 0.8)))
+        win.blit(bt, bt.get_rect(center=(W // 2, 70)))
     draw_flying_coins(win)
 
     if damage_flash > 0:
