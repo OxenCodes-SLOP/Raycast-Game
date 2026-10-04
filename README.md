@@ -3,7 +3,7 @@ a simple game like doom but medival, very customisabe.
 
 you do not need to download the images to play but I recommend it.
 
-v2.1.0
+v3.1.0
 naming goes v=version 1st number=updated fetures 2nd number=style changes 4rd number= bug fixes
 
 sounds coming soon
