@@ -1,5 +1,5 @@
 # Raycasted-Dungeon-Crawler
-a simple game like doom but medival, very customisabe.
+a simple medival 3d game.
 
 you do not need to download the images to play but I recommend it.
 
