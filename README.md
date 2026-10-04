@@ -7,4 +7,6 @@ v1.0.0
 
 sounds coming soon
 
+Dependancies: numpy, os, math, sys, random, pygame
+
 Images from google, sounds will be from Freesound.org, and coded with the help of Claude
